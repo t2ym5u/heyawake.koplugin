@@ -24,10 +24,12 @@ so that:
 - **Three difficulty levels**, defined by the logic a puzzle needs:
   - *Easy* — counting, no touching shades, the three-room rule, and keeping
     the white cells connected;
-  - *Medium* — also room analysis (every way of placing a room's shades
+  - *Medium* — also one room analysis (every way of placing a room's shades
     agrees on a cell);
-  - *Hard* — also one-step trial ("if this cell were shaded, something
-    breaks").
+  - *Hard* — several room analyses (at least 2 on 6×6, 3 on 8×8 and
+    10×10), with rooms of up to 16 cells.
+  No level ever needs a guess ("if this cell were shaded, something
+  breaks").
 - **Unique solution, every time** — each puzzle is generated together with a
   logic solver that must finish it within the difficulty's techniques, which
   proves there is exactly one solution
@@ -57,11 +59,13 @@ line is closest to running out of cells, and gives up early for a fresh room
 layout rather than wander). Every room gets its number; where the solver
 still cannot finish, the room of an undecided cell is cut in two. Needless
 walls are then merged away and numbers removed one by one, each change kept
-only if the solver still finishes at the chosen difficulty.
+only if the solver still finishes at the chosen difficulty with the right
+amount of room analysis (Hard never takes a removal that lowers it).
 
-Over 150 seeds on a desktop (LuaJIT), 10×10 takes 0.01–0.05 s on average
-and at most about 0.15 s (hard). A Kobo is 5–10× slower, so a progress bar
-appears whenever generation runs longer than a fraction of a second.
+Over 50 seeds per size and level on a desktop (LuaJIT), 10×10 takes
+0.01–0.035 s on average and at most about 0.1 s (medium and hard). A Kobo is much
+slower, so a progress bar appears whenever generation runs longer than a
+fraction of a second.
 Generation depends only on the random seed — node and attempt budgets, never
 the clock — so the Daily Challenge is the same grid on every device.
 

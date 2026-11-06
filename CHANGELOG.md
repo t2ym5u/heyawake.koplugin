@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-11-05
+
+### Changed
+- Hard no longer needs a guess. Until now every Hard puzzle could only be
+  finished by shading a cell and seeing a rule break ("what if this cell
+  were shaded?"). Hard now asks for room analysis (every way of placing a
+  room's shaded cells agrees on a cell) several times over: at least 2 on
+  6×6 and 3 on 8×8 and 10×10, where Medium needs exactly one. Hard rooms
+  may also merge into larger ones (up to 16 cells).
+- The hint only gives cells found by logic without guessing. On a Hard game
+  saved by an older version, when logic finds nothing it reveals a cell of
+  the solution instead.
+- Medium and Hard puzzles differ from those of 1.0.x for the same seed, so
+  the Daily Challenge may show a different Heyawake grid once. Hard
+  generation takes longer (up to ~0.35 s on a desktop, a few seconds on a
+  Kobo, with the progress bar).
+- Faster generation, about twice as fast: the solver no longer makes a new
+  closure for every solve, and the generator's own steps run outside
+  LuaJIT's compiler, which kept flushing and recompiling the solver. Worst
+  case over 50 seeds on a desktop: 10×10 and 8×8 Hard ~0.21 s → ~0.1 s,
+  6×6 Hard ~0.1 s → ~50 ms. Same puzzles for the same seed.
+
 ## [1.0.5] - 2026-11-04
 
 ### Fixed
