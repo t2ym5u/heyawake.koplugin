@@ -155,10 +155,11 @@ describe("HeyawakeBoard", function()
             { n = 8,  diff = "medium", seeds = 4 },
             { n = 8,  diff = "hard",   seeds = 4 },
             { n = 10, diff = "easy",   seeds = 2 },
+            { n = 10, diff = "medium", seeds = 2 },
             { n = 10, diff = "hard",   seeds = 2 },
         }
         for _, case in ipairs(cases) do
-            it(("%dx%d %s: valid, unique, solvable at its tier"):format(case.n, case.n, case.diff), function()
+            it(("%dx%d %s: valid, unique, guess-free, in its window"):format(case.n, case.n, case.diff), function()
                 for seed = 1, case.seeds do
                     local b = newBoard(case.n, case.diff, seed)
                     assert.is_nil(b.gen_info.fallback)
@@ -180,14 +181,38 @@ describe("HeyawakeBoard", function()
                     for i, v in ipairs(flatSolution(b)) do
                         assert.are.equal(v, st[i] == Solver.SHADED)
                     end
+                    -- no trial, and the amount of room analysis the level asks
+                    local gstatus, _, t2 = Solver.grade(b.ctx)
+                    assert.are.equal("solved", gstatus)
+                    local w = Board.t2Window(case.diff, case.n)
+                    assert.is_true(t2 >= w[1] and t2 <= w[2],
+                        ("%dx%d %s seed %d: t2=%d"):format(case.n, case.n, case.diff, seed, t2))
                 end
             end)
         end
 
-        it("hard puzzles need trial", function()
-            for seed = 1, 8 do
-                local b = newBoard(6, "hard", seed)
-                assert.are.equal("stuck", (Solver.solve(b.ctx, 2)))
+        it("keeps the levels apart: hard needs more room analysis than medium", function()
+            for _, n in ipairs({ 6, 8, 10 }) do
+                assert.is_true(Board.t2Window("hard", n)[1] > Board.t2Window("medium", n)[2])
+                assert.is_true(Board.t2Window("medium", n)[1] > Board.t2Window("easy", n)[2])
+            end
+            -- and medium/hard puzzles really do need room analysis
+            for seed = 1, 6 do
+                for _, diff in ipairs({ "medium", "hard" }) do
+                    local b = newBoard(6, diff, 100 + seed)
+                    assert.are.equal("stuck", (Solver.solve(b.ctx, 1)))
+                end
+            end
+        end)
+
+        it("stays within a generous time bound at 10x10", function()
+            for seed = 1, 3 do
+                for _, diff in ipairs({ "medium", "hard" }) do
+                    local t0 = os.clock()
+                    newBoard(10, diff, 500 + seed)
+                    -- at most ~0.35 s on the Mac under LuaJIT
+                    assert.is_true(os.clock() - t0 < 6)
+                end
             end
         end)
 
@@ -211,7 +236,7 @@ describe("HeyawakeBoard", function()
             local fb = Board._FALLBACK
             local ctx = Solver.buildContext(fb.n, fb.rooms)
             assert.are.equal(1, Solver.countSolutions(ctx, 2))
-            assert.are.equal("solved", (Solver.solve(ctx, 3)))
+            assert.are.equal("solved", (Solver.solve(ctx, 2)))
         end)
     end)
 
@@ -372,6 +397,47 @@ describe("HeyawakeBoard", function()
             Board.undo(b2)
             assert.are.equal(Board.STATE_BLACK, b2.user[2][2])
             assert.are.equal(1, Solver.countSolutions(b2.ctx, 2))
+        end)
+
+        -- 1.0.x made Hard puzzles that needed a trial, which the solver no
+        -- longer does: such a save must still load and play, and the hint
+        -- must still finish it (by revealing once logic is stuck).
+        it("loads and finishes a Hard puzzle saved by 1.0.x", function()
+            local sol = { { 0, 0, 1, 0, 0, 0 }, { 0, 1, 0, 0, 1, 0 }, { 0, 0, 1, 0, 0, 1 },
+                          { 1, 0, 0, 1, 0, 0 }, { 0, 1, 0, 0, 1, 0 }, { 0, 0, 0, 0, 0, 0 } }
+            local solution = {}
+            for r = 1, 6 do
+                solution[r] = {}
+                for c = 1, 6 do solution[r][c] = sol[r][c] == 1 end
+            end
+            local b = Board:new{}
+            assert.is_true(b:load({
+                n = 6, difficulty = "hard", solution = solution, hints_used = 0,
+                rooms = {
+                    { r1 = 2, c1 = 4, r2 = 3, c2 = 4, clue = 0 },
+                    { r1 = 1, c1 = 5, r2 = 3, c2 = 6, clue = -1 },
+                    { r1 = 4, c1 = 3, r2 = 5, c2 = 3, clue = -1 },
+                    { r1 = 4, c1 = 6, r2 = 5, c2 = 6, clue = 0 },
+                    { r1 = 6, c1 = 1, r2 = 6, c2 = 3, clue = -1 },
+                    { r1 = 6, c1 = 4, r2 = 6, c2 = 6, clue = 0 },
+                    { r1 = 2, c1 = 2, r2 = 3, c2 = 3, clue = -1 },
+                    { r1 = 1, c1 = 2, r2 = 1, c2 = 4, clue = -1 },
+                    { r1 = 4, c1 = 1, r2 = 5, c2 = 2, clue = 2 },
+                    { r1 = 4, c1 = 4, r2 = 5, c2 = 5, clue = -1 },
+                    { r1 = 1, c1 = 1, r2 = 3, c2 = 1, clue = 0 },
+                },
+            }))
+            assert.are.equal(1, Solver.countSolutions(b.ctx, 2))
+            assert.are.equal("stuck", (Solver.solve(b.ctx, 2)))
+            local guard = 0
+            while not b:isSolved() do
+                guard = guard + 1
+                assert.is_true(guard < 100)
+                local step = b:findHint()
+                assert.is_not_nil(step)
+                assert.are.equal("fill", step.kind)
+                assert.is_true(b:applyHint(step))
+            end
         end)
 
         it("rejects garbage", function()

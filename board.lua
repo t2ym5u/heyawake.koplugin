@@ -24,19 +24,30 @@ local STATE_WHITE_DOT = Solver.WHITE     -- 2
 local DEFAULT_N          = 6
 local DEFAULT_DIFFICULTY = "easy"
 
--- Difficulty = the highest solver tier the puzzle may need (see solver.lua).
--- Easy is counting, adjacency, three-room lines and keeping the white cells
--- connected; medium adds room analysis; hard adds one-step trial. The generator
--- prefers puzzles that actually need their cap, so the labels differ in
--- play and not only in name.
-local TIER_CAP = { easy = 1, medium = 2, hard = 3 }
+-- Difficulty = the highest solver tier the puzzle may need (see solver.lua),
+-- and how much room analysis (tier 2) it takes. Easy is counting, adjacency,
+-- three-room lines and keeping the white cells connected; medium adds a
+-- little room analysis; hard several times as much (its rooms may merge
+-- up to HARD_MERGE_MAX_AREA cells). No level ever needs a trial ("shade
+-- this cell and see what breaks"): that is guessing. T2_WINDOW[difficulty][n] = { min, max } room analyses (see
+-- Solver.grade); the generator keeps the puzzle inside it.
+local TIER_CAP = { easy = 1, medium = 2, hard = 2 }
+local T2_WINDOW = {
+    easy   = { [6] = { 0, 0 }, [8] = { 0, 0 }, [10] = { 0, 0 } },
+    medium = { [6] = { 1, 1 }, [8] = { 1, 1 }, [10] = { 1, 1 } },
+    hard   = { [6] = { 2, math.huge }, [8] = { 3, math.huge }, [10] = { 3, math.huge } },
+}
+local function t2Window(difficulty, n)
+    local w = T2_WINDOW[difficulty] or T2_WINDOW.easy
+    return w[n] or w[10]
+end
 
 -- Rooms: at most ROOM_MAX_DIM cells on a side and ROOM_MAX_AREA cells.
 local ROOM_MAX_DIM  = 4
 local ROOM_MAX_AREA = { [6] = 6, [8] = 8, [10] = 9 }
 
 local MAX_ATTEMPTS     = 40   -- shaded layouts tried per puzzle
-local TIER_ATTEMPTS    = 15   -- of which: tries to find one needing the cap
+local TIER_ATTEMPTS    = 40   -- of which: tries to land in the level's window
 local MAX_SPLITS       = 30   -- room cuts allowed to make a layout solvable
 local SHADE_PROBABILITY = 0.4 -- chance a free cell is tried shaded first
 -- The shading search is heavy-tailed: most layouts shade within a few dozen
@@ -45,12 +56,11 @@ local SHADE_PROBABILITY = 0.4 -- chance a free cell is tried shaded first
 -- the tail. SHADE_LAYOUTS bounds the fresh layouts tried per attempt.
 local function shadeNodeBudget(n) return math.max(30, math.floor(n * n / 2)) end
 local SHADE_LAYOUTS     = 60
--- Room cuts aim for a layout tier 2 can finish; digging clues afterwards is
--- what makes a hard puzzle need tier 3, and repairing at tier 3 directly
--- costs a trial-heavy solve per cut.
-local REPAIR_CAP        = 2
-local HARD_EXTRA_REMOVALS = 3
 local MERGE_MAX_AREA    = 12
+-- Hard merges into larger rooms: more ways to place their shaded cells, so
+-- more room analysis to rule them out.
+local HARD_MERGE_MAX_AREA = 16
+local HARD_REMOVAL_ORDERS = 2
 
 -- ---------------------------------------------------------------------------
 -- Room partition: guillotine cuts until every piece is small enough, then
@@ -175,8 +185,10 @@ end
 --    solver still finishes (mergeRooms) -- fewer, larger rooms read more like
 --    a printed Heyawake than the sliver rooms step 2 leaves behind.
 -- 4. Clues are removed one at a time, in random order, as long as the solver
---    still finishes; for hard, a last pass with trial allowed (at most
---    HARD_EXTRA_REMOVALS removals: trial solves are the expensive ones).
+--    still finishes (for medium: without needing more room analysis than
+--    its window allows).
+-- 5. The puzzle is graded (Solver.grade); one inside the level's window of
+--    room analyses is taken, else the closest found is kept.
 -- The solver finishing proves uniqueness: each of its deductions is forced,
 -- so a puzzle it completes has exactly one solution. (The test suite
 -- cross-checks this with a brute-force count over many seeds; the generator
@@ -281,12 +293,12 @@ local function splitRoom(n, rooms, k, shaded)
 end
 
 -- Undoes needless cuts: two side-by-side rooms whose union is a rectangle
--- (at most ROOM_MAX_DIM a side, MERGE_MAX_AREA cells) become one, with the
+-- (at most ROOM_MAX_DIM a side, max_area cells) become one, with the
 -- combined count, whenever the solver at `cap` still finishes. Removing a wall
 -- never breaks the shading (a line through three rooms after the merge ran
 -- through at least three before it). One pass over the candidate pairs in
 -- random order. Returns the rooms, context and number of merges.
-local function mergeRooms(n, rooms, ctx, shaded, cap)
+local function mergeRooms(n, rooms, ctx, shaded, cap, max_area)
     local cands = {}
     for a = 1, #rooms do
         for b = a + 1, #rooms do
@@ -304,7 +316,7 @@ local function mergeRooms(n, rooms, ctx, shaded, cap)
             local U = { r1 = math.min(A.r1, B.r1), c1 = math.min(A.c1, B.c1),
                         r2 = math.max(A.r2, B.r2), c2 = math.max(A.c2, B.c2) }
             local h, w = U.r2 - U.r1 + 1, U.c2 - U.c1 + 1
-            if h <= ROOM_MAX_DIM and w <= ROOM_MAX_DIM and h * w <= MERGE_MAX_AREA then
+            if h <= ROOM_MAX_DIM and w <= ROOM_MAX_DIM and h * w <= max_area then
                 local new_rooms = {}
                 for _, room in ipairs(rooms) do
                     if room ~= A and room ~= B then new_rooms[#new_rooms + 1] = room end
@@ -330,12 +342,34 @@ local function report(on_progress, attempt, inner)
     if on_progress then on_progress(1 - 0.5 ^ (attempt - 1) * (1 - inner / 2)) end
 end
 
+-- Distance of a room-analysis count to the window, 0 = inside.
+local function windowGap(t2, w)
+    if t2 < w[1] then return w[1] - t2 end
+    if t2 > w[2] then return t2 - w[2] end
+    return 0
+end
+
 local function generatePuzzle(n, difficulty, stats, on_progress)
     local cap = TIER_CAP[difficulty] or 1
+    local window = t2Window(difficulty, n)
+    local merge_area = difficulty == "hard" and HARD_MERGE_MAX_AREA or MERGE_MAX_AREA
     local function note(key)
         if stats then stats[key] = (stats[key] or 0) + 1 end
     end
-    local best
+    -- Solved at the cap, and (when a maximum applies) without more room
+    -- analysis than the window allows.
+    local floor_t2 = 0
+    local function fits(ctx)
+        if cap < 2 then return Solver.solve(ctx, cap) == "solved" end
+        local status, _, t2 = Solver.grade(ctx)
+        if status ~= "solved" or t2 > window[2] then return false end
+        if difficulty == "hard" then
+            if t2 < floor_t2 then return false end
+            floor_t2 = t2
+        end
+        return true
+    end
+    local best, best_gap
     for attempt = 1, MAX_ATTEMPTS do
         report(on_progress, attempt, 0)
         local rooms, ctx, shaded
@@ -351,7 +385,7 @@ local function generatePuzzle(n, difficulty, stats, on_progress)
             setClues(ctx, shaded)
             while splits <= MAX_SPLITS do
                 local st, _tier
-                status, _tier, st = Solver.solve(ctx, math.min(cap, REPAIR_CAP))
+                status, _tier, st = Solver.solve(ctx, cap)
                 if status ~= "stuck" then break end
                 local stuck = {}
                 for i = 1, ctx.N do
@@ -376,48 +410,64 @@ local function generatePuzzle(n, difficulty, stats, on_progress)
         local merges = 0
         if status == "solved" then
             report(on_progress, attempt, 0.3)
-            rooms, ctx, merges = mergeRooms(n, rooms, ctx, shaded, math.min(cap, 2))
+            rooms, ctx, merges = mergeRooms(n, rooms, ctx, shaded, cap, merge_area)
             report(on_progress, attempt, 0.5)
-            -- A pass at the difficulty's tier (tier 2 for hard), then for hard
-            -- a pass with trial allowed: that pass starts from a puzzle tier 2
-            -- cannot shorten, so whatever it removes makes the puzzle need
-            -- trial. Trial solves are the expensive ones, hence its cap.
-            -- (A tier-1 pass before medium's tier-2 one was tried: it leaves
-            -- room analysis almost nothing to remove.)
+            -- Clue removal at the difficulty's tier. (A tier-1 pass before
+            -- medium's tier-2 one was tried: it leaves room analysis almost
+            -- nothing to remove.) Hard never takes a removal that lowers the
+            -- amount of room analysis, and tries a few removal orders on the
+            -- same layout, keeping the one that needs the most: cheaper than
+            -- a fresh layout.
             local order = {}
             for k = 1, #rooms do order[k] = k end
-            local t0 = math.min(cap, 2)
-            for t = t0, cap do
+            local initial = {}
+            for k, room in ipairs(rooms) do initial[k] = room.clue end
+            local passes = difficulty == "hard" and HARD_REMOVAL_ORDERS or 1
+            local keep, keep_t2, keep_clues
+            for pass = 1, passes do
+                for k, room in ipairs(rooms) do room.clue = initial[k] end
                 shuffle(order)
-                local removed = 0
+                floor_t2 = cap >= 2 and select(3, Solver.grade(ctx)) or 0
                 for j, k in ipairs(order) do
                     report(on_progress, attempt,
-                        0.5 + 0.5 * ((t - t0) * #order + j) / ((cap - t0 + 1) * #order))
+                        0.5 + 0.5 * ((pass - 1) * #order + j) / (passes * #order))
                     local clue = rooms[k].clue
                     if clue then
                         rooms[k].clue = nil
-                        if Solver.solve(ctx, t) == "solved" then
-                            removed = removed + 1
-                            if t >= 3 and removed >= HARD_EXTRA_REMOVALS then break end
-                        else
-                            rooms[k].clue = clue
-                        end
+                        if not fits(ctx) then rooms[k].clue = clue end
                     end
                 end
+                if passes > 1 then
+                    local st, _, t2 = Solver.grade(ctx)
+                    local nclues = 0
+                    for _, room in ipairs(rooms) do
+                        if room.clue then nclues = nclues + 1 end
+                    end
+                    if st == "solved" and (not keep or t2 > keep_t2
+                            or (t2 == keep_t2 and nclues < keep_clues)) then
+                        keep, keep_t2, keep_clues = {}, t2, nclues
+                        for k, room in ipairs(rooms) do keep[k] = room.clue end
+                    end
+                    if t2 >= window[1] then break end
+                end
             end
-            local final, tier = Solver.solve(ctx, cap)
-            if final == "solved" then
+            if keep then
+                for k, room in ipairs(rooms) do room.clue = keep[k] end
+            end
+            local final, tier, t2 = Solver.grade(ctx)
+            if final == "solved" and tier <= cap then
                 local clues = 0
                 for _, room in ipairs(rooms) do
                     if room.clue then clues = clues + 1 end
                 end
                 local cand = { rooms = rooms, shaded = shaded,
-                               info = { tier = tier, cap = cap, attempts = attempt,
+                               info = { tier = tier, cap = cap, t2 = t2, attempts = attempt,
                                         splits = splits, merges = merges,
                                         clues = clues, rooms = #rooms } }
-                note("ok_tier" .. tier)
-                if not best or tier > best.info.tier then best = cand end
-                if tier >= cap or attempt >= TIER_ATTEMPTS then break end
+                local gap = windowGap(t2, window)
+                note("ok_t2_" .. t2)
+                if not best or gap < best_gap then best, best_gap = cand, gap end
+                if gap == 0 or attempt >= TIER_ATTEMPTS then break end
             else
                 note("final_check_failed")
             end
@@ -527,7 +577,7 @@ function HeyawakeBoard:generate(difficulty, on_progress)
         for k, room in ipairs(FALLBACK.rooms) do
             self.rooms[k] = { r1 = room.r1, c1 = room.c1, r2 = room.r2, c2 = room.c2, clue = room.clue }
         end
-        local _, _, st = Solver.solve(Solver.buildContext(n, self.rooms), 3)
+        local _, _, st = Solver.solve(Solver.buildContext(n, self.rooms), 2)
         flat = {}
         for i = 1, n * n do flat[i] = st[i] == Solver.SHADED end
         self.gen_info = { fallback = true }
@@ -765,7 +815,7 @@ function HeyawakeBoard:findHint()
     local step, reason = gridFindHint(self)
     if not step or step.kind == "mistake" then return step, reason end
     local st = self:userState()
-    local ok, _, log = Solver.propagate(self.ctx, st, 3)
+    local ok, _, log = Solver.propagate(self.ctx, st, 2)
     if ok and log[1] then
         -- Prefer the first shade the solver finds: dots are optional, so a
         -- hint that only says "this cell is white" barely moves the game on.
@@ -856,9 +906,21 @@ HeyawakeBoard.STATE_BLACK     = STATE_BLACK
 HeyawakeBoard.STATE_WHITE_DOT = STATE_WHITE_DOT
 HeyawakeBoard.TIER_CAP        = TIER_CAP
 HeyawakeBoard.Solver          = Solver
+HeyawakeBoard.t2Window        = t2Window
 HeyawakeBoard._partition      = partition
 HeyawakeBoard._generatePuzzle = generatePuzzle
 HeyawakeBoard._makeShading    = makeShading
 HeyawakeBoard._FALLBACK       = FALLBACK
+
+-- The generator's own steps run interpreted (and so do the closures they
+-- make): they are branchy one-off code that kept LuaJIT compiling new
+-- traces, so often that its trace cache filled and was flushed many times
+-- per puzzle, recompiling the solver's hot loops each time. The solver's
+-- rules, where the time goes, stay compiled. Same puzzles either way.
+if jit then
+    for _, f in ipairs({ partition, makeShading, setClues, splitRoom, mergeRooms, generatePuzzle }) do
+        jit.off(f, true)
+    end
+end
 
 return HeyawakeBoard
