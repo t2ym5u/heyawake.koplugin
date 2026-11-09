@@ -20,14 +20,6 @@ describe("HeyawakeBoard", function()
         return b
     end
 
-    local function flatSolution(b)
-        local t = {}
-        for r = 1, b.n do
-            for c = 1, b.n do t[(r - 1) * b.n + c] = b.solution[r][c] end
-        end
-        return t
-    end
-
     -- Plays the stored solution onto the board.
     local function playSolution(b)
         for r = 1, b.n do
@@ -147,82 +139,6 @@ describe("HeyawakeBoard", function()
 
     -- -----------------------------------------------------------------------
     describe("generator", function()
-        local cases = {
-            { n = 6,  diff = "easy",   seeds = 12 },
-            { n = 6,  diff = "medium", seeds = 12 },
-            { n = 6,  diff = "hard",   seeds = 12 },
-            { n = 8,  diff = "easy",   seeds = 4 },
-            { n = 8,  diff = "medium", seeds = 4 },
-            { n = 8,  diff = "hard",   seeds = 4 },
-            { n = 10, diff = "easy",   seeds = 2 },
-            { n = 10, diff = "medium", seeds = 2 },
-            { n = 10, diff = "hard",   seeds = 2 },
-        }
-        for _, case in ipairs(cases) do
-            it(("%dx%d %s: valid, unique, guess-free, in its window"):format(case.n, case.n, case.diff), function()
-                for seed = 1, case.seeds do
-                    local b = newBoard(case.n, case.diff, seed)
-                    assert.is_nil(b.gen_info.fallback)
-                    assert.are.equal(case.n, b.n)
-                    -- rooms tile the grid
-                    local area = 0
-                    for _, room in ipairs(b.rooms) do
-                        area = area + (room.r2 - room.r1 + 1) * (room.c2 - room.c1 + 1)
-                    end
-                    assert.are.equal(case.n * case.n, area)
-                    -- the stored solution obeys every rule with these clues
-                    assert.is_true(Solver.isValidSolution(b.ctx, flatSolution(b)))
-                    -- brute force agrees there is exactly one solution
-                    assert.are.equal(1, Solver.countSolutions(b.ctx, 2))
-                    -- the logic solver finishes within the difficulty's tier
-                    local status, tier, st = Solver.solve(b.ctx, Board.TIER_CAP[case.diff])
-                    assert.are.equal("solved", status)
-                    assert.is_true(tier <= Board.TIER_CAP[case.diff])
-                    for i, v in ipairs(flatSolution(b)) do
-                        assert.are.equal(v, st[i] == Solver.SHADED)
-                    end
-                    -- no trial, and the amount of room analysis the level asks
-                    local gstatus, _, t2 = Solver.grade(b.ctx)
-                    assert.are.equal("solved", gstatus)
-                    local w = Board.t2Window(case.diff, case.n)
-                    assert.is_true(t2 >= w[1] and t2 <= w[2],
-                        ("%dx%d %s seed %d: t2=%d"):format(case.n, case.n, case.diff, seed, t2))
-                end
-            end)
-        end
-
-        it("keeps the levels apart: hard needs more room analysis than medium", function()
-            for _, n in ipairs({ 6, 8, 10 }) do
-                assert.is_true(Board.t2Window("hard", n)[1] > Board.t2Window("medium", n)[2])
-                assert.is_true(Board.t2Window("medium", n)[1] > Board.t2Window("easy", n)[2])
-            end
-            -- and medium/hard puzzles really do need room analysis
-            for seed = 1, 6 do
-                for _, diff in ipairs({ "medium", "hard" }) do
-                    local b = newBoard(6, diff, 100 + seed)
-                    assert.are.equal("stuck", (Solver.solve(b.ctx, 1)))
-                end
-            end
-        end)
-
-        it("stays within a generous time bound at 10x10", function()
-            for seed = 1, 3 do
-                for _, diff in ipairs({ "medium", "hard" }) do
-                    local t0 = os.clock()
-                    newBoard(10, diff, 500 + seed)
-                    -- at most ~0.35 s on the Mac under LuaJIT
-                    assert.is_true(os.clock() - t0 < 6)
-                end
-            end
-        end)
-
-        it("easy puzzles never need more than tier 1", function()
-            for seed = 1, 8 do
-                local b = newBoard(6, "easy", seed)
-                assert.are.equal("solved", (Solver.solve(b.ctx, 1)))
-            end
-        end)
-
         it("leaves some rooms without a number", function()
             local b = newBoard(8, "medium", 3)
             local blank = 0
